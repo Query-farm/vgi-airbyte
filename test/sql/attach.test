@@ -1,0 +1,102 @@
+# name: test/sql/attach.test
+# description: ATTACH a connector with its catalog: every stream becomes a table
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_FIXTURE_API
+
+require-env AIRBYTE_FIXTURES
+
+require-env AIRBYTE_FAKE_SOURCE
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+# A declarative manifest, its catalog passed as JSON through a variable.
+statement ok
+CREATE SECRET fixture (TYPE airbyte,
+  CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "fixture-token", "page_size": 7}',
+  SCOPE 'airbyte://{AIRBYTE_FIXTURES}/manifest.yaml');
+
+statement ok
+SET VARIABLE cat = (SELECT catalog::VARCHAR FROM airbyte.main.catalog('{AIRBYTE_FIXTURES}/manifest.yaml'));
+
+statement ok
+ATTACH 'airbyte' AS fx (TYPE vgi, LOCATION '{AIRBYTE_WORKER}', connector '{AIRBYTE_FIXTURES}/manifest.yaml',
+  catalog getvariable('cat'));
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'fx' ORDER BY table_name;
+----
+forbidden
+items
+users
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'fx' AND table_name = 'items' ORDER BY column_index;
+----
+id	BIGINT
+name	VARCHAR
+price	DOUBLE
+in_stock	BOOLEAN
+updated_at	TIMESTAMP WITH TIME ZONE
+tags	VARCHAR[]
+dims	STRUCT(w BIGINT, h BIGINT)
+attributes	JSON
+
+query IR
+SELECT count(*), sum(price) FROM fx.items;
+----
+25	406.25
+
+query TI
+SELECT u.user_id, i.id FROM fx.users u JOIN fx.items i ON i.id = CAST(substr(u.user_id, 2) AS BIGINT) ORDER BY u.user_id LIMIT 2;
+----
+u1	1
+u2	2
+
+query T
+SELECT comment FROM duckdb_tables() WHERE database_name = 'fx' AND table_name = 'items';
+----
+<REGEX>:Stream `items` of the Airbyte connector .*manifest.yaml. Primary key: id. Sync modes: full_refresh, incremental.
+
+# An Airbyte-protocol executable, its catalog from a file; the namespaced stream keeps its name.
+statement ok
+CREATE SECRET fake (TYPE airbyte, CONFIG '{"password": "s3cret", "orders_rows": 2500, "state_every": 100}',
+  SCOPE 'airbyte://exec:{AIRBYTE_FAKE_SOURCE}');
+
+statement ok
+ATTACH 'airbyte' AS fk (TYPE vgi, LOCATION '{AIRBYTE_WORKER}', connector 'exec:{AIRBYTE_FAKE_SOURCE}',
+  catalog '{AIRBYTE_FIXTURES}/fake-catalog.json');
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'fk' ORDER BY table_name;
+----
+customers
+orders
+
+# More than one batch (1,000 rows each).
+query IIR
+SELECT count(*), max(id), sum(amount) FROM fk.orders;
+----
+2500	2500	7815625.0
+
+query IT
+SELECT id, status FROM fk.orders WHERE id BETWEEN 10 AND 12 ORDER BY id;
+----
+10	paid
+11	shipped
+12	new
+
+statement error
+ATTACH 'airbyte' AS fk3 (TYPE vgi, LOCATION '{AIRBYTE_WORKER}', connector 'exec:{AIRBYTE_FAKE_SOURCE}');
+----
+<REGEX>:.*needs a catalog.*
+
+statement error
+ATTACH 'airbyte' AS fk4 (TYPE vgi, LOCATION '{AIRBYTE_WORKER}', connector 'exec:{AIRBYTE_FAKE_SOURCE}', catalog '/nope.json');
+----
+<REGEX>:.*neither Airbyte catalog JSON nor an existing file.*

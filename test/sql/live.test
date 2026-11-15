@@ -1,0 +1,50 @@
+# name: test/sql/live.test
+# description: The real Airbyte registry and a real manifest-only connector (opt-in: AIRBYTE_LIVE=1, needs network)
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_LIVE
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+query T
+SELECT count(*) > 400 FROM airbyte.main.connectors() WHERE manifest_only;
+----
+true
+
+query T
+SELECT license_policy FROM airbyte.main.connectors() WHERE name = 'source-pokeapi';
+----
+requires accept_license := 'ELv2'
+
+# PokeAPI is keyless; its config only names the pokemon.
+statement ok
+CREATE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi');
+
+query IT
+SELECT id, name FROM airbyte.main.read_stream('source-pokeapi', 'pokemon', accept_license := 'ELv2');
+----
+25	pikachu
+
+# ATTACH a live connector with its discovered catalog (the README example).
+statement ok
+SET VARIABLE cat = (SELECT catalog::VARCHAR FROM airbyte.main.catalog('source-pokeapi', accept_license := 'ELv2'));
+
+statement ok
+ATTACH 'airbyte' AS poke (TYPE vgi, LOCATION '{AIRBYTE_WORKER}', connector 'source-pokeapi', accept_license 'ELv2',
+  catalog getvariable('cat'));
+
+query TI
+SELECT name, base_experience FROM poke.pokemon;
+----
+pikachu	112
+
+# The worker refuses an unacknowledged ELv2 connector.
+statement error
+SELECT * FROM airbyte.main.read_stream('source-pokeapi', 'pokemon');
+----
+<REGEX>:.*accept_license := 'ELv2'.*

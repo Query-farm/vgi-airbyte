@@ -1,0 +1,117 @@
+{
+ "streams": [
+  {
+   "name": "orders",
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "airbyte_type": "timestamp_with_timezone"
+     },
+     "amount": {
+      "type": [
+       "null",
+       "number"
+      ]
+     },
+     "status": {
+      "type": [
+       "null",
+       "string"
+      ]
+     }
+    }
+   },
+   "supported_sync_modes": [
+    "full_refresh",
+    "incremental"
+   ],
+   "source_defined_cursor": true,
+   "default_cursor_field": [
+    "updated_at"
+   ],
+   "source_defined_primary_key": [
+    [
+     "id"
+    ]
+   ]
+  },
+  {
+   "name": "customers",
+   "namespace": "crm",
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "integer"
+     },
+     "name": {
+      "type": [
+       "null",
+       "string"
+      ]
+     },
+     "signup": {
+      "type": [
+       "null",
+       "string"
+      ],
+      "format": "date"
+     },
+     "last_seen": {
+      "type": [
+       "null",
+       "string"
+      ],
+      "format": "date-time",
+      "airbyte_type": "timestamp_without_timezone"
+     },
+     "balance": {
+      "type": [
+       "null",
+       "number"
+      ]
+     },
+     "visits": {
+      "type": [
+       "null",
+       "number"
+      ],
+      "airbyte_type": "integer"
+     },
+     "huge": {
+      "type": [
+       "null",
+       "string"
+      ],
+      "airbyte_type": "big_integer"
+     },
+     "address": {
+      "type": [
+       "null",
+       "object"
+      ],
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   },
+   "supported_sync_modes": [
+    "full_refresh"
+   ],
+   "source_defined_primary_key": [
+    [
+     "id"
+    ]
+   ]
+  }
+ ]
+}

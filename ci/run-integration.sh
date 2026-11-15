@@ -71,13 +71,33 @@ start_server() {
   echo "::error::'$*' never printed PORT:<n>"; cat "$log"; return 1
 }
 
-# The mock APIs fetch_items is tested against. The plain one rate-limits every
-# page once (429 + Retry-After) so the retry path is always exercised.
-unset AIRBYTE_API_TOKEN
-MOCK_API_FLAKY=1 start_server "$STAGE/mock.log" $PYTHON "$REPO/test/mock_api/server.py"
-export AIRBYTE_MOCK_API="http://127.0.0.1:$PORT"
-MOCK_API_TOKEN=test-token start_server "$STAGE/mock-auth.log" $PYTHON "$REPO/test/mock_api/server.py"
-export AIRBYTE_MOCK_API_AUTH="http://127.0.0.1:$PORT"
+# Hermetic fixtures: the REST API + registry mirror the in-repo manifest reads,
+# the fake Airbyte-protocol executable, and a scratch directory for catalog logs.
+# airbyte-cdk is installed once (by the worker's own installer) into a cache under
+# .tools so declarative-manifest runs reinstall nothing between runs.
+start_server "$STAGE/fixture.log" $PYTHON "$REPO/test/fixture_api/server.py"
+export AIRBYTE_FIXTURE_API="http://127.0.0.1:$PORT"
+export AIRBYTE_FIXTURES="$REPO/test/fixtures"
+export AIRBYTE_FAKE_SOURCE="$REPO/test/fake_source/source-fake"
+export AIRBYTE_SCRATCH="$STAGE/scratch"
+mkdir -p "$AIRBYTE_SCRATCH"
+export VGI_AIRBYTE_CACHE_DIR="${VGI_AIRBYTE_CACHE_DIR:-$REPO/.tools/airbyte-cache}"
+if ! "$(dirname "$WORKER")/python" -c "
+from airbyte_worker.connector import DEFAULT_CDK_VERSION, cdk_command
+print(cdk_command(DEFAULT_CDK_VERSION))" >"$STAGE/cdk.log" 2>&1; then
+  echo "::error::airbyte-cdk could not be installed; the manifest tests cannot run:"; tail -20 "$STAGE/cdk.log"; exit 1
+fi
+
+# Docker mode: opt-in (AIRBYTE_TEST_DOCKER=1) and only with a working daemon. The
+# image wraps the fake source, so the test stays hermetic apart from the base image.
+if [ "${AIRBYTE_TEST_DOCKER:-0}" = "1" ] && docker info >/dev/null 2>&1; then
+  docker build -q -t vgi-airbyte-source-fake:test -f "$REPO/test/fake_source/Dockerfile" "$REPO/test/fake_source" >/dev/null
+  export AIRBYTE_DOCKER_IMAGE="vgi-airbyte-source-fake:test"
+else
+  EXPECTED_SKIP_REASONS="${EXPECTED_SKIP_REASONS:-}"$'\n'"require-env AIRBYTE_DOCKER_IMAGE"
+fi
+# Live registry test: opt-in (AIRBYTE_LIVE=1), needs network.
+[ -n "${AIRBYTE_LIVE:-}" ] || EXPECTED_SKIP_REASONS="${EXPECTED_SKIP_REASONS:-}"$'\n'"require-env AIRBYTE_LIVE"
 
 HTTP=0
 case "$TRANSPORT" in
@@ -154,7 +174,7 @@ echo "executed $executed of $total test files over $TRANSPORT ($skipped skipped)
 if [ "$executed" -lt "$MIN_EXECUTED" ]; then
   echo "::error::only $executed test files ran (MIN_EXECUTED=$MIN_EXECUTED)"; rc=1
 fi
-if [ "$HTTP" = "1" ] && ! kill -0 "${PIDS[2]}" 2>/dev/null; then
+if [ "$HTTP" = "1" ] && ! kill -0 "${PIDS[${#PIDS[@]}-1]}" 2>/dev/null; then
   echo "::error::the HTTP worker died during the run:"; cat "$STAGE/worker.log"; rc=1
 fi
 exit "$rc"

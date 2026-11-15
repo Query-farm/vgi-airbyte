@@ -1,0 +1,40 @@
+# name: test/sql/types.test
+# description: json_schema_type, the JSON Schema -> DuckDB type mapping (no connector needed)
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+query T
+SELECT airbyte.main.json_schema_type(s) FROM (VALUES
+  (1, '{"type": "integer"}'),
+  (2, '{"type": ["null", "number"], "airbyte_type": "integer"}'),
+  (3, '{"type": "number"}'),
+  (4, '{"type": "string", "airbyte_type": "big_integer"}'),
+  (5, '{"type": "string", "format": "date-time", "airbyte_type": "timestamp_with_timezone"}'),
+  (6, '{"type": "string", "format": "date-time", "airbyte_type": "timestamp_without_timezone"}'),
+  (7, '{"type": "string", "format": "date"}'),
+  (8, '{"type": "object", "properties": {"w": {"type": "integer"}}}'),
+  (9, '{"type": "object", "additionalProperties": true}'),
+  (10, '{"type": "array", "items": {"type": "boolean"}}'),
+  (11, '{"type": ["string", "integer"]}'),
+  (12, NULL),
+  (13, 'not json')) v(i, s) ORDER BY i;
+----
+BIGINT
+BIGINT
+DOUBLE
+VARCHAR
+TIMESTAMP WITH TIME ZONE
+TIMESTAMP
+DATE
+STRUCT("w" BIGINT)
+JSON
+BOOLEAN[]
+JSON
+NULL
+NULL

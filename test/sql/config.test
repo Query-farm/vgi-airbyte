@@ -1,0 +1,80 @@
+# name: test/sql/config.test
+# description: Config secrets: spec validation, a wrong token, explicit secret names, the license-free paths
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_FIXTURE_API
+
+require-env AIRBYTE_FIXTURES
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+# A config that breaks the spec: missing field, wrong type. Values are never echoed.
+statement ok
+CREATE SECRET broken (TYPE airbyte, CONFIG '{"base_url": 42, "page_size": "SECRETVALUE"}', SCOPE 'airbyte://elsewhere');
+
+query TTT
+SELECT status, config_valid, message LIKE '%SECRETVALUE%' FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml', secret_name := 'broken');
+----
+FAILED	false	false
+
+query T
+SELECT message FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml', secret_name := 'broken');
+----
+<REGEX>:.*missing required field 'api_token'.*base_url must be of type string.*page_size must be of type integer.*
+
+statement error
+SELECT * FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items', secret_name := 'broken');
+----
+<REGEX>:.*does not match manifest.yaml's spec: .*missing required field 'api_token'.*
+
+# A valid config with the wrong token: the connector's own check fails.
+statement ok
+CREATE SECRET wrong (TYPE airbyte, CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "nope"}', SCOPE 'airbyte://elsewhere');
+
+query TT
+SELECT status, config_valid FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml', secret_name := 'wrong');
+----
+FAILED	true
+
+statement error
+SELECT * FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'users', secret_name := 'wrong');
+----
+<REGEX>:.*401.*
+
+statement error
+SELECT * FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml', secret_name := 'missing');
+----
+<REGEX>:.*no airbyte secret named 'missing'.*
+
+# The config value is redacted in duckdb_secrets().
+query T
+SELECT secret_string LIKE '%nope%' FROM duckdb_secrets() WHERE name = 'wrong';
+----
+false
+
+# No secret at all: an empty config, which the spec rejects.
+query TT
+SELECT status, config_valid FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml');
+----
+FAILED	false
+
+# Bad references and arguments.
+statement error
+SELECT * FROM airbyte.main.spec('/no/such/manifest.yaml');
+----
+<REGEX>:.*does not exist.*
+
+statement error
+SELECT * FROM airbyte.main.spec('{AIRBYTE_FIXTURES}/oss_registry.json');
+----
+<REGEX>:.*looks like a path but is not a .yaml manifest or an executable.*
+
+statement error
+SELECT * FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items', state := 'not json');
+----
+<REGEX>:.*state is not valid JSON.*

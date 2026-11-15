@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""A hermetic Airbyte-protocol source for the tests. Standard library only.
+
+    source-fake spec
+    source-fake check    --config config.json
+    source-fake discover --config config.json
+    source-fake read     --config config.json --catalog configured.json [--state state.json]
+
+Every message is one JSON line on stdout (AirbyteMessage). Streams:
+
+  orders     incremental, source-defined cursor ``updated_at``, primary key ``id``;
+             ``orders_rows`` rows (default 12), a STATE every ``state_every``
+             records (default 5); resumes from the input state.
+  customers  full refresh, namespace ``crm``; 3 rows covering the Airbyte types
+             (date, naive timestamp, big_integer, number, nested object).
+
+Config keys: password (required; check SUCCEEDS only for "s3cret"),
+orders_rows, state_every, state_mode ("stream" | "global" | "legacy"),
+fail_after (emit a TRACE error and exit 1 after that many orders), catalog_log
+(write the configured catalog, input state and config file mode there).
+A non-JSON banner line is printed first: real connectors do that too.
+"""
+
+import argparse
+import datetime as dt
+import json
+import os
+import stat
+import sys
+import time
+
+SPEC = {
+    "documentationUrl": "https://example.com/source-fake",
+    "connectionSpecification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "Fake Source Spec",
+        "type": "object",
+        "required": ["password"],
+        "properties": {
+            "password": {"type": "string", "airbyte_secret": True, "description": "Must be s3cret."},
+            "orders_rows": {"type": "integer", "minimum": 0, "default": 12},
+            "state_every": {"type": "integer", "minimum": 1},
+            "state_mode": {"type": "string", "enum": ["stream", "global", "legacy"]},
+            "fail_after": {"type": "integer"},
+            "catalog_log": {"type": "string"},
+        },
+    },
+    "supportsIncremental": True,
+}
+ORDERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "updated_at": {"type": "string", "format": "date-time", "airbyte_type": "timestamp_with_timezone"},
+        "amount": {"type": ["null", "number"]},
+        "status": {"type": ["null", "string"]},
+    },
+}
+CUSTOMERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "name": {"type": ["null", "string"]},
+        "signup": {"type": ["null", "string"], "format": "date"},
+        "last_seen": {
+            "type": ["null", "string"],
+            "format": "date-time",
+            "airbyte_type": "timestamp_without_timezone",
+        },
+        "balance": {"type": ["null", "number"]},
+        "visits": {"type": ["null", "number"], "airbyte_type": "integer"},
+        "huge": {"type": ["null", "string"], "airbyte_type": "big_integer"},
+        "address": {"type": ["null", "object"], "properties": {"city": {"type": "string"}}},
+    },
+}
+CATALOG = {
+    "streams": [
+        {
+            "name": "orders",
+            "json_schema": ORDERS_SCHEMA,
+            "supported_sync_modes": ["full_refresh", "incremental"],
+            "source_defined_cursor": True,
+            "default_cursor_field": ["updated_at"],
+            "source_defined_primary_key": [["id"]],
+        },
+        {
+            "name": "customers",
+            "namespace": "crm",
+            "json_schema": CUSTOMERS_SCHEMA,
+            "supported_sync_modes": ["full_refresh"],
+            "source_defined_primary_key": [["id"]],
+        },
+    ]
+}
+START = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+
+
+def emit(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def log(level, message):
+    emit({"type": "LOG", "log": {"level": level, "message": message}})
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def orders_cursor(state_msgs):
+    """The orders cursor from an input state in any of the three forms."""
+    for m in state_msgs:
+        kind = m.get("type", "LEGACY")
+        if kind == "STREAM" and m["stream"]["stream_descriptor"]["name"] == "orders":
+            return m["stream"]["stream_state"].get("updated_at")
+        if kind == "GLOBAL":
+            for s in m["global"].get("stream_states", []):
+                if s["stream_descriptor"]["name"] == "orders":
+                    return s["stream_state"].get("updated_at")
+        if kind == "LEGACY":
+            return (m.get("data") or {}).get("orders", {}).get("updated_at")
+    return None
+
+
+def state_message(mode, cursor):
+    stream_state = {"updated_at": cursor}
+    if mode == "global":
+        return {
+            "type": "GLOBAL",
+            "global": {
+                "shared_state": {"sync": "fake"},
+                "stream_states": [{"stream_descriptor": {"name": "orders"}, "stream_state": stream_state}],
+            },
+        }
+    if mode == "legacy":
+        return {"type": "LEGACY", "data": {"orders": stream_state}}
+    return {
+        "type": "STREAM",
+        "stream": {"stream_descriptor": {"name": "orders"}, "stream_state": stream_state},
+        "sourceStats": {"recordCount": 1.0},
+    }
+
+
+def read(config, catalog, state_msgs):
+    selected = {s["stream"]["name"]: s for s in catalog["streams"]}
+    rows = int(config.get("orders_rows", 12))
+    every = int(config.get("state_every", 5))
+    mode = config.get("state_mode", "stream")
+    fail_after = config.get("fail_after")
+    if "customers" in selected:
+        customers = [
+            {"id": 1, "name": "Ada", "signup": "2025-01-02", "last_seen": "2026-02-03T04:05:06",
+             "balance": 10.5, "visits": 3, "huge": "123456789012345678901234567890", "address": {"city": "Oslo"}},
+            {"id": 2, "name": None, "signup": "2025-06-30", "last_seen": None,
+             "balance": -1.25, "visits": 7.0, "huge": None, "address": None},
+            {"id": 3, "name": "Cy", "signup": "not a date", "last_seen": "2026-12-31T23:59:59",
+             "balance": None, "visits": None, "huge": "42", "address": {"city": "Lima"}},
+        ]
+        for c in customers:
+            emit({"type": "RECORD", "record": {"stream": "customers", "namespace": "crm", "data": c,
+                                               "emitted_at": now_ms()}})
+    if "orders" in selected:
+        cfg = selected["orders"]
+        incremental = cfg.get("sync_mode") == "incremental"
+        since = orders_cursor(state_msgs) if incremental else None
+        log("WARN", "orders: the fake source is fake")
+        count = 0
+        last = None
+        for i in range(1, rows + 1):
+            ts = (START + dt.timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if since is not None and ts <= since:
+                continue
+            if fail_after is not None and count >= int(fail_after):
+                emit({"type": "TRACE", "trace": {"type": "ERROR", "emitted_at": now_ms(), "error": {
+                    "message": "the fake upstream API returned HTTP 500",
+                    "internal_message": "GET /orders?page=2 -> 500",
+                    "failure_type": "system_error"}}})
+                sys.exit(1)
+            emit({"type": "RECORD", "record": {"stream": "orders", "emitted_at": now_ms(), "data": {
+                "id": i, "updated_at": ts, "amount": i * 2.5, "status": ["new", "paid", "shipped"][i % 3]}}})
+            count += 1
+            last = ts
+            if incremental and count % every == 0:
+                emit({"type": "STATE", "state": state_message(mode, last)})
+        if incremental and last is not None:
+            emit({"type": "STATE", "state": state_message(mode, last)})
+        emit({"type": "TRACE", "trace": {"type": "STREAM_STATUS", "emitted_at": now_ms(), "stream_status": {
+            "stream_descriptor": {"name": "orders"}, "status": "COMPLETE"}}})
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["spec", "check", "discover", "read"])
+    parser.add_argument("--config")
+    parser.add_argument("--catalog")
+    parser.add_argument("--state")
+    args = parser.parse_args()
+    print("fake-source starting up (not a JSON message)", flush=True)
+    if args.command == "spec":
+        emit({"type": "SPEC", "spec": SPEC})
+        return
+    with open(args.config) as f:
+        config = json.load(f)
+    if args.command == "check":
+        ok = config.get("password") == "s3cret"
+        emit({"type": "CONNECTION_STATUS", "connectionStatus": {
+            "status": "SUCCEEDED" if ok else "FAILED",
+            **({} if ok else {"message": "authentication failed: wrong password"})}})
+        return
+    if args.command == "discover":
+        emit({"type": "CATALOG", "catalog": CATALOG})
+        return
+    with open(args.catalog) as f:
+        catalog = json.load(f)
+    state_msgs = []
+    if args.state:
+        with open(args.state) as f:
+            state_msgs = json.load(f)
+    if config.get("catalog_log"):
+        with open(config["catalog_log"], "w") as f:
+            json.dump({"catalog": catalog, "state": state_msgs,
+                       "config_mode": oct(stat.S_IMODE(os.stat(args.config).st_mode))}, f)
+    read(config, catalog, state_msgs)
+
+
+if __name__ == "__main__":
+    main()

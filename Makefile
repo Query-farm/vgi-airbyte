@@ -61,7 +61,7 @@ run-http: build ## Serve over HTTP on port 8000
 	$(WORKER) --http --host 127.0.0.1 --port 8000
 
 debug: build tools ## Run one query against the worker with debug logging on stderr
-	@printf "LOAD vgi;\nATTACH 'airbyte' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT airbyte.main.greet('debug');\n" \
+	@printf "LOAD vgi;\nATTACH 'airbyte' (TYPE vgi, LOCATION '$(WORKER) --debug');\nSELECT airbyte.main.json_schema_type('{"type": "integer"}');\n" \
 	  | uvx --from haybarn-cli==$(HAYBARN_VERSION) haybarn -no-agent
 
 template-diff: ## Show upstream template changes since this project was created

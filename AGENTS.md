@@ -22,14 +22,24 @@ Faster loops while iterating: `make test-unit`, `make test-sql`, `make lint-expl
 
 ```
 src/airbyte_worker/
-  worker.py        # assembles the catalog; add new functions to FUNCTIONS
+  worker.py        # assembles the catalog, secret type and ATTACH options; add functions to FUNCTIONS
   meta.py          # catalog/schema metadata + helpers (object_tags, column)
-  greet.py         # scalar example (overloads, ConstParam choices)
-  sequence.py      # table function example (named args, streaming state)
-  fetch_items.py   # REST API table function (pagination, retries, secrets)
+  catalog.py       # ATTACH connector + catalog -> one table per stream (redirects to read_stream)
+  common.py        # shared connector args, `airbyte` secret lookup, resumable scan engine
+  connector.py     # connector references, CDK env install, subprocess/Docker runner, spec/check/discover
+  registry.py      # Airbyte connector registry, manifest download, license policy
+  protocol.py      # Airbyte messages, catalogs, configured catalogs, state merging
+  jsonschema.py    # JSON Schema (+ airbyte_type) -> Arrow types and value coercion
+  listing.py       # connectors()
+  inspect_fns.py   # spec, check_connection, discover, catalog
+  read_stream.py   # read_stream, final_state
+  raw.py           # messages
+  schema_type.py   # json_schema_type scalar
 tests/             # pytest unit tests (in-process client)
 test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
+test/fixture_api/  # hermetic REST API + registry mirror
+test/fixtures/     # declarative manifests, registry and catalog fixtures
+test/fake_source/  # hermetic Airbyte-protocol executable (+ Dockerfile for the opt-in Docker test)
 examples/          # recipes: pushdown, caching, catalog tables, aggregates, COPY …
 ci/                # integration harness used by `make test-sql` and CI
 scripts/           # vgi_template.py (init / template-diff)
@@ -38,8 +48,8 @@ vgi-agent-tests.yaml  # private graders for the agent test tasks
 
 ## Recipe: add a function
 
-1. Create `src/airbyte_worker/<name>.py`. Copy the closest example: `greet.py` for a
-   scalar, `sequence.py` for a generator, `fetch_items.py` for an API.
+1. Create `src/airbyte_worker/<name>.py`. Copy the closest example: `schema_type.py` for a
+   scalar, `listing.py` for a fixed-schema table function, `read_stream.py` for a connector-running one.
 2. Declare arguments with `Annotated[..., Param(...)]`/`ConstParam(...)` (scalars) or a
    frozen dataclass of `Annotated[..., Arg(...)]` (table functions). Use `Arg(0, ...)`
    for positional arguments and `Arg("name", default=...)` for named ones.
@@ -56,7 +66,7 @@ Then, for every new function:
    (`airbyte.main.fn(...)`): project, filter or aggregate rather than `SELECT *`.
 2. **Executable examples:** if the function is deterministic and needs no network,
    add an `executable_examples` entry with `ORDER BY` and an `expected_result`.
-3. **SQL test:** add cases to `test/sql/airbyte.test`, or a new `test/sql/<name>.test`
+3. **SQL test:** add cases to `test/sql/manifest.test` (or `protocol.test`), or a new `test/sql/<name>.test`
    with the same header (`require vgi`, `require-env AIRBYTE_WORKER`, then `ATTACH`).
    Avoid expected-error text that depends on SDK wording; use `<REGEX>:.*` for errors you
    don't control.
@@ -130,8 +140,8 @@ in the vgi-python docs.
 - **State must be serializable.** Table-function state (`initial_state`/`process`) must subclass `ArrowSerializableDataclass`. Over HTTP each batch can be served by a different process, so the cursor travels with the request. Keep it small, and never put secrets in it.
 - **Examples must be deterministic.** Add `ORDER BY`, and no `now()`, random values or
   network. Examples that hit a live API go in `examples`, not `executable_examples`.
-- **Credentials.** Read them from a DuckDB secret first (`CREATE SECRET (TYPE airbyte_api, …)`),
-  then from an environment variable. Never put them in logs, examples or the repo, and
+- **Credentials.** Read them from a DuckDB secret (`CREATE SECRET (TYPE airbyte, CONFIG '…')`),
+  never from environment variables. Never put them in logs, examples or the repo, and
   keep them out of table-function state unless the state rule above says
   the SDK encrypts it. Workers that need real credentials set `execute: false` on the metadata check.
 - **Errors.** Raise errors with a clear message. For HTTP failures, include the status
@@ -160,7 +170,4 @@ in the vgi-python docs.
 ## Useful prompts
 
 - "Add a scalar `slugify(text VARCHAR) -> VARCHAR` with full metadata and tests."
-- "Replace `fetch_items` with a table function for <API>. Map its JSON to typed columns,
-  read the token from a `airbyte_api` secret, and add mock-server tests."
-- "Add a catalog table `countries` (code, name) with a primary key, following
-  `examples/catalog_tables`."
+- "Add a fixture stream to test/fixtures/manifest.yaml that uses <CDK feature> and a SQL test for it."

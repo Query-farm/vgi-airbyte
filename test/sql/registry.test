@@ -1,0 +1,100 @@
+# name: test/sql/registry.test
+# description: Registry listing, registry-resolved manifest connectors, and the license policy (fixture registry mirror)
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_FIXTURE_API
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+statement ok
+SET VARIABLE reg = '{AIRBYTE_FIXTURE_API}/files/registries/v0/oss_registry.json';
+
+query TTTTTTT
+SELECT name, version, language, manifest_only::VARCHAR, release_stage, license, license_policy
+FROM airbyte.main.connectors(registry_url := getvariable('reg')) ORDER BY name;
+----
+source-dockeronly	2.1.0	python	false	beta	Apache-2.0	runs
+source-fake-enterprise	0.9.0	java	false	alpha	Airbyte Enterprise	refused (commercial license)
+source-fixture	0.1.0	manifest-only	true	generally_available	MIT	runs
+source-fixture-custom	1.0.0	manifest-only	true	alpha	MIT	runs
+source-fixture-elv2	0.2.0	manifest-only	true	alpha	ELv2	requires accept_license := 'ELv2'
+
+query TT
+SELECT docker_image, replace(manifest_url, '{AIRBYTE_FIXTURE_API}', '') FROM airbyte.main.connectors(registry_url := getvariable('reg'))
+WHERE name = 'source-fixture';
+----
+airbyte/source-fixture:0.1.0	/files/metadata/airbyte/source-fixture/0.1.0/manifest.yaml
+
+# A registry name resolves to its published manifest; the source- prefix is optional.
+statement ok
+CREATE SECRET fixture (TYPE airbyte,
+  CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "fixture-token"}', SCOPE 'airbyte://source-fixture');
+
+query TTT
+SELECT connector, mode, license FROM airbyte.main.spec('source-fixture', registry_url := getvariable('reg'));
+----
+source-fixture	manifest	MIT
+
+query IT
+SELECT count(*), max(user_id) FROM airbyte.main.read_stream('source-fixture', 'users', registry_url := getvariable('reg'));
+----
+7	u7
+
+# An explicit version picks that manifest; the scope is the reference as written.
+statement ok
+CREATE SECRET fixture_v (TYPE airbyte,
+  CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "fixture-token"}', SCOPE 'airbyte://source-fixture@0.1.0');
+
+query I
+SELECT count(*) FROM airbyte.main.read_stream('source-fixture@0.1.0', 'items', registry_url := getvariable('reg'));
+----
+25
+
+# ELv2: refused until acknowledged.
+statement error
+SELECT * FROM airbyte.main.spec('source-fixture-elv2', registry_url := getvariable('reg'));
+----
+<REGEX>:.*Elastic License 2.0.*accept_license := 'ELv2'.*
+
+statement ok
+CREATE SECRET fixture_elv2 (TYPE airbyte,
+  CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "fixture-token"}', SCOPE 'airbyte://fixture-elv2');
+
+query IT
+SELECT count(*), any_value(license) FROM airbyte.main.read_stream('fixture-elv2', 'users', registry_url := getvariable('reg'),
+  accept_license := 'ELv2') CROSS JOIN (SELECT license FROM airbyte.main.spec('fixture-elv2', registry_url := getvariable('reg'), accept_license := 'elv2'));
+----
+7	ELv2
+
+# Commercial licenses are refused even with an acknowledgement.
+statement error
+SELECT * FROM airbyte.main.spec('source-fake-enterprise', registry_url := getvariable('reg'), accept_license := 'Airbyte Enterprise');
+----
+<REGEX>:.*commercial agreement.*
+
+# Custom Python components need allow_custom_code.
+statement error
+SELECT * FROM airbyte.main.spec('source-fixture-custom', registry_url := getvariable('reg'));
+----
+<REGEX>:.*custom Python components.*allow_custom_code := true.*
+
+# A non-manifest connector runs its Docker image; its spec comes from the registry.
+query TTT
+SELECT mode, required, secret_fields FROM airbyte.main.spec('source-dockeronly', registry_url := getvariable('reg'));
+----
+docker	[]	[]
+
+statement error
+SELECT * FROM airbyte.main.connectors(registry_url := '{AIRBYTE_FIXTURE_API}/files/registries/v0/missing.json');
+----
+<REGEX>:.*HTTP 404.*
+
+statement error
+SELECT * FROM airbyte.main.spec('source-nope', registry_url := getvariable('reg'));
+----
+<REGEX>:.*no source named 'source-nope' in the Airbyte registry.*

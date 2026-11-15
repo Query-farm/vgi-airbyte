@@ -1,12 +1,14 @@
 [project]
 name = "vgi-airbyte-worker"
 version = "0.1.0"
-description = "A VGI worker for DuckDB, generated from the Query.Farm VGI starter template."
+description = "Run Airbyte source connectors (declarative manifests, Docker images, executables) and query their streams in DuckDB."
 readme = "README.md"
-license = "MIT-0"
+license = "0BSD"
 license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
+    "jsonschema>=4.23",
+    "pyyaml>=6.0.2",
     # [http] adds the HTTP transport (`--http`) used by Docker deploys.
     # SDK bumps go through the template (minor bumps can raise the protocol).
     "vgi-python[http]>=0.51.1,<0.52",
@@ -24,6 +26,8 @@ dev = [
     "mypy>=1.18",
     "ruff>=0.14",
     "pyarrow-stubs>=20.0",
+    "types-pyyaml>=6.0.12.20261113",
+    "types-jsonschema>=4.26.0.20261006",
 ]
 
 [build-system]

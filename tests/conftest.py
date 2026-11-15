@@ -1,8 +1,7 @@
-"""Shared fixtures: a worker client and the local mock API."""
+"""Shared fixtures: a worker client, and an isolated cache directory."""
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,17 +19,7 @@ def client() -> Iterator[Client]:
         yield c
 
 
-@pytest.fixture(scope="session")
-def mock_api() -> Iterator[str]:
-    """Start test/mock_api/server.py on a free port and return its base URL."""
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "test" / "mock_api" / "server.py")],
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    assert proc.stdout is not None
-    line = proc.stdout.readline().strip()
-    assert line.startswith("PORT:"), line
-    yield f"http://127.0.0.1:{line.removeprefix('PORT:')}"
-    proc.terminate()
-    proc.wait(timeout=10)
+@pytest.fixture(autouse=True)
+def _cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registry/manifest caches out of the user's cache directory."""
+    monkeypatch.setenv("VGI_AIRBYTE_CACHE_DIR", str(tmp_path / "cache"))

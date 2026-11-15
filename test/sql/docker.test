@@ -1,0 +1,41 @@
+# name: test/sql/docker.test
+# description: Docker mode: an image speaking the Airbyte protocol (opt-in: AIRBYTE_TEST_DOCKER=1 builds test/fake_source/Dockerfile)
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_DOCKER_IMAGE
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+statement ok
+CREATE SECRET dockerfake (TYPE airbyte, CONFIG '{"password": "s3cret"}', SCOPE 'airbyte://docker:{AIRBYTE_DOCKER_IMAGE}');
+
+query TT
+SELECT mode, required FROM airbyte.main.spec('docker:{AIRBYTE_DOCKER_IMAGE}');
+----
+docker	[password]
+
+query T
+SELECT status FROM airbyte.main.check_connection('docker:{AIRBYTE_DOCKER_IMAGE}');
+----
+SUCCEEDED
+
+query IR
+SELECT count(*), sum(amount) FROM airbyte.main.read_stream('docker:{AIRBYTE_DOCKER_IMAGE}', 'orders');
+----
+12	195.0
+
+query ITT
+SELECT records, streams, state_type FROM airbyte.main.final_state('docker:{AIRBYTE_DOCKER_IMAGE}');
+----
+15	[crm.customers, orders]	STREAM
+
+# LIMIT stops reading early; the container is removed.
+query I
+SELECT count(*) FROM (SELECT id FROM airbyte.main.read_stream('docker:{AIRBYTE_DOCKER_IMAGE}', 'orders') LIMIT 2);
+----
+2

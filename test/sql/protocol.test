@@ -1,0 +1,213 @@
+# name: test/sql/protocol.test
+# description: Any Airbyte-protocol source, through the hermetic fake executable (test/fake_source/source-fake)
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_FAKE_SOURCE
+
+require-env AIRBYTE_SCRATCH
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+statement ok
+CREATE SECRET fake (TYPE airbyte, CONFIG '{"password": "s3cret", "catalog_log": "{AIRBYTE_SCRATCH}/catalog-log.json"}',
+  SCOPE 'airbyte://exec:{AIRBYTE_FAKE_SOURCE}');
+
+# spec comes from the connector's own `spec` command.
+query TTTT
+SELECT mode, required, secret_fields, documentation_url FROM airbyte.main.spec('exec:{AIRBYTE_FAKE_SOURCE}');
+----
+exec	[password]	[password]	https://example.com/source-fake
+
+query TTT
+SELECT status, message, config_valid FROM airbyte.main.check_connection('exec:{AIRBYTE_FAKE_SOURCE}');
+----
+SUCCEEDED	NULL	true
+
+statement ok
+CREATE SECRET fake_wrong (TYPE airbyte, CONFIG '{"password": "guess"}', SCOPE 'airbyte://nothing');
+
+query TT
+SELECT status, message FROM airbyte.main.check_connection('exec:{AIRBYTE_FAKE_SOURCE}', secret_name := 'fake_wrong');
+----
+FAILED	authentication failed: wrong password
+
+# The spec's enum and minimum are enforced before the connector runs.
+statement ok
+CREATE SECRET fake_bad (TYPE airbyte, CONFIG '{"password": "s3cret", "orders_rows": -1, "state_mode": "weird"}', SCOPE 'airbyte://nothing');
+
+statement error
+SELECT * FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', secret_name := 'fake_bad');
+----
+<REGEX>:.*orders_rows fails the spec's 'minimum' rule \(0\).*state_mode must be one of \['stream', 'global', 'legacy'\].*
+
+query TTTTT
+SELECT stream, namespace, table_name, supported_sync_modes, primary_key
+FROM airbyte.main.discover('exec:{AIRBYTE_FAKE_SOURCE}') ORDER BY stream;
+----
+customers	crm	customers	[full_refresh]	[id]
+orders	NULL	orders	[full_refresh, incremental]	[id]
+
+# Airbyte types: date, naive timestamp, number-as-integer, big_integer, struct.
+query TT
+SELECT c.name, c.type FROM (
+  SELECT unnest(columns) AS c FROM airbyte.main.discover('exec:{AIRBYTE_FAKE_SOURCE}') WHERE stream = 'customers');
+----
+id	BIGINT
+name	VARCHAR
+signup	DATE
+last_seen	TIMESTAMP
+balance	DOUBLE
+visits	BIGINT
+huge	VARCHAR
+address	STRUCT("city" VARCHAR)
+
+# Values that do not fit the declared type ('not a date') become NULL. Namespaced name works too.
+query ITTTRITT
+SELECT id, name, signup::VARCHAR, last_seen::VARCHAR, balance, visits, huge, address.city
+FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'crm.customers') ORDER BY id;
+----
+1	Ada	2025-01-02	2026-02-03 04:05:06	10.5	3	123456789012345678901234567890	Oslo
+2	NULL	2025-06-30	NULL	-1.25	7	NULL	NULL
+3	Cy	NULL	2026-12-31 23:59:59	NULL	NULL	42	Lima
+
+# Incremental orders (STATE every 5 records); projection prunes the configured catalog.
+query IIR
+SELECT count(*), max(id), sum(amount) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders');
+----
+12	12	195.0
+
+query TTTT
+SELECT c->>'$.catalog.streams[0].sync_mode', c->>'$.catalog.streams[0].cursor_field[0]',
+       json_keys(c->'$.catalog.streams[0].stream.json_schema.properties')::VARCHAR, c->>'$.config_mode'
+FROM (SELECT content::JSON AS c FROM read_text('{AIRBYTE_SCRATCH}/catalog-log.json'));
+----
+incremental	updated_at	[id, updated_at, amount]	0o600
+
+query T
+SELECT typeof(updated_at) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders') LIMIT 1;
+----
+TIMESTAMP WITH TIME ZONE
+
+# Resume from a per-stream state.
+query II
+SELECT count(*), min(id) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders',
+  state := '[{"type":"STREAM","stream":{"stream_descriptor":{"name":"orders"},"stream_state":{"updated_at":"2026-03-01T00:09:00Z"}}}]');
+----
+3	10
+
+# final_state merges STATE messages; it round-trips into the next read.
+query ITTT
+SELECT records, state_messages, streams, state_type FROM airbyte.main.final_state('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders');
+----
+12	3	[orders]	STREAM
+
+query ITT
+SELECT records, streams, final_state->>'$[0].stream.stream_state.updated_at' FROM airbyte.main.final_state('exec:{AIRBYTE_FAKE_SOURCE}');
+----
+15	[crm.customers, orders]	2026-03-01T00:12:00Z
+
+# Global and legacy state forms.
+statement ok
+CREATE SECRET fake_global (TYPE airbyte, CONFIG '{"password": "s3cret", "state_mode": "global"}', SCOPE 'airbyte://nothing');
+
+statement ok
+CREATE SECRET fake_legacy (TYPE airbyte, CONFIG '{"password": "s3cret", "state_mode": "legacy"}', SCOPE 'airbyte://nothing');
+
+query TT
+SELECT state_type, final_state->>'$[0].global.stream_states[0].stream_state.updated_at'
+FROM airbyte.main.final_state('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders', secret_name := 'fake_global');
+----
+GLOBAL	2026-03-01T00:12:00Z
+
+query I
+SELECT count(*) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', secret_name := 'fake_global',
+  state := '[{"type":"GLOBAL","global":{"shared_state":{},"stream_states":[{"stream_descriptor":{"name":"orders"},"stream_state":{"updated_at":"2026-03-01T00:10:00Z"}}]}}]');
+----
+2
+
+query TT
+SELECT state_type, final_state->>'$[0].data.orders.updated_at'
+FROM airbyte.main.final_state('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders', secret_name := 'fake_legacy');
+----
+LEGACY	2026-03-01T00:12:00Z
+
+# A bare legacy state object is wrapped as a LEGACY message.
+query I
+SELECT count(*) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', secret_name := 'fake_legacy',
+  state := '{"orders": {"updated_at": "2026-03-01T00:11:00Z"}}');
+----
+1
+
+# full_refresh: no cursor, no state.
+query I
+SELECT count(*) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', sync_mode := 'full_refresh',
+  state := '[{"type":"STREAM","stream":{"stream_descriptor":{"name":"orders"},"stream_state":{"updated_at":"2026-03-01T00:11:00Z"}}}]');
+----
+12
+
+statement error
+SELECT * FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'customers', sync_mode := 'incremental');
+----
+<REGEX>:.*does not support sync_mode 'incremental'.*
+
+# Raw messages: the non-JSON banner line is skipped; LOG/TRACE/STATE decoded.
+query TI
+SELECT type, count(*) FROM airbyte.main.messages('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders') GROUP BY type ORDER BY type;
+----
+LOG	1
+RECORD	12
+STATE	3
+TRACE	1
+
+query TTT
+SELECT log_level, log_message, (SELECT stream_status FROM airbyte.main.messages('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders') WHERE type = 'TRACE')
+FROM airbyte.main.messages('exec:{AIRBYTE_FAKE_SOURCE}', stream := 'orders') WHERE type = 'LOG';
+----
+WARN	orders: the fake source is fake	COMPLETE
+
+query TT
+SELECT type, message->>'$.connectionStatus.status' FROM airbyte.main.messages('exec:{AIRBYTE_FAKE_SOURCE}', command := 'check');
+----
+CONNECTION_STATUS	SUCCEEDED
+
+query IT
+SELECT seq, type FROM airbyte.main.messages('exec:{AIRBYTE_FAKE_SOURCE}', command := 'discover');
+----
+1	CATALOG
+
+# A TRACE error fails the query with the connector's message.
+statement ok
+CREATE SECRET fake_fail (TYPE airbyte, CONFIG '{"password": "s3cret", "fail_after": 4}', SCOPE 'airbyte://nothing');
+
+statement error
+SELECT count(*) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', secret_name := 'fake_fail');
+----
+<REGEX>:.*source-fake failed \(exit code 1\): the fake upstream API returned HTTP 500 \(GET /orders\?page=2 -> 500\).*
+
+statement error
+SELECT * FROM airbyte.main.final_state('exec:{AIRBYTE_FAKE_SOURCE}', secret_name := 'fake_fail');
+----
+<REGEX>:.*the fake upstream API returned HTTP 500.*
+
+# catalog_json skips discover.
+statement ok
+SET VARIABLE fake_cat = (SELECT catalog::VARCHAR FROM airbyte.main.catalog('exec:{AIRBYTE_FAKE_SOURCE}'));
+
+query I
+SELECT count(*) FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders', catalog_json := getvariable('fake_cat'));
+----
+12
+
+# LIMIT stops reading early.
+query I
+SELECT count(*) FROM (SELECT id FROM airbyte.main.read_stream('exec:{AIRBYTE_FAKE_SOURCE}', 'orders') LIMIT 3);
+----
+3

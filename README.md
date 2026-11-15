@@ -1,290 +1,257 @@
-<!-- managed-by: vgi-starters (edit upstream in shared/README.md.tmpl, then run tools/render.py) -->
 <p align="center">
   <img src="https://query.farm/media-kit/products/vgi/vgi-logo.png" alt="Vector Gateway Interface (VGI)" width="320">
 </p>
 
-<p align="center"><em>A Query.Farm VGI worker for DuckDB, written in Python.</em></p>
+# Run Airbyte Source Connectors and Query Their Streams in DuckDB
 
-# VGI Airbyte Worker — Python
+> **vgi-airbyte** · a [Query.Farm](https://query.farm) VGI worker
 
 [![CI](https://github.com/Query-farm/vgi-airbyte/actions/workflows/ci.yml/badge.svg)](https://github.com/Query-farm/vgi-airbyte/actions/workflows/ci.yml)
 [![vgi worker: query.farm](https://query.farm/media-kit/shields/vgi-worker.svg)](https://query.farm)
 
-[VGI](https://query.farm/vgi) lets DuckDB call functions that live in a separate
-process: your code, in any language, exposed as ordinary SQL. This worker adds
-three example functions that you rename and replace with your own:
+[Airbyte](https://airbyte.com) publishes about 600 source connectors. Most of them (over
+500) are **declarative manifests**: a `manifest.yaml` that Airbyte's Python CDK turns into
+a working connector. This worker runs them, or any other source that speaks the
+[Airbyte protocol](https://docs.airbyte.com/understanding-airbyte/airbyte-protocol), from
+DuckDB, and returns their streams as typed tables.
 
-| Function | Kind | Shows you how to |
-|---|---|---|
-| `greet(name)` / `greet(name, style)` | scalar | vectorize over a column, overload, constrain a constant |
-| `sequence_table(count, step := 1)` | table | stream rows in batches, take named arguments |
-| `fetch_items(base_url, page_size := 100)` | table | page through a REST API, retry, read a secret |
-
+- **Declarative manifests first.** Registry connectors that are manifest-only, local
+  manifests and manifest URLs run through the CDK's `source-declarative-manifest`, pinned
+  to `airbyte-cdk==7.48.0` and installed once into its own cached virtual environment.
+  The CDK and its dependencies (pandas, nltk, Google Cloud libraries) never enter the
+  worker's environment.
+- **Any Airbyte-protocol source.** A Docker image (`docker:airbyte/source-faker:6.2.0`)
+  or a local executable (`exec:/path/to/source`) that implements `spec`, `check`,
+  `discover` and `read`.
+- **Licenses are visible and enforced.** `connectors()` shows every registry connector's
+  license. ELv2 connectors run only after you acknowledge the license; see
+  [License policy](#license-policy).
+- **Configs from secrets only**, checked against the connector's spec before it runs. The
+  error names missing or mistyped fields and never quotes a value.
+- **Real types.** Stream JSON Schemas (with Airbyte's `airbyte_type` hints) become
+  `BIGINT`, `DOUBLE`, `BOOLEAN`, `VARCHAR`, `TIMESTAMPTZ`, `TIMESTAMP`, `DATE`, `STRUCT`,
+  `LIST`, or `JSON` for open shapes.
+- **Incremental and resumable.** Airbyte STATE (per-stream, global or legacy) is the scan
+  cursor; pass a saved state to read only what changed.
 
 ## Quick start
-
-**Prerequisites:** Python 3.13+ and [uv](https://docs.astral.sh/uv/) (it runs the SQL
-test runner and the metadata checker).
-
-```bash
-make build
-```
-
-Then open DuckDB 2.0 or [Haybarn](https://query.farm/products/haybarn) and attach the
-worker. `LOCATION` is the command DuckDB runs to start it; use an absolute path,
-because a relative one resolves against DuckDB's working directory.
-
-**DuckDB 2.0:**
-
-```sql
-SET allow_extension_repositories = 'allowed';
-CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm WITH PREFIX 'https://duckdb-extensions.query.farm';
-INSTALL vgi FROM query_farm;
-LOAD vgi FROM query_farm;
-ATTACH 'airbyte' (TYPE vgi, LOCATION '/abs/path/to/vgi-airbyte/.venv/bin/vgi-airbyte-worker');
-```
-
-**Haybarn 2.0** (`uvx haybarn-cli`):
 
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'airbyte' (TYPE vgi, LOCATION '/abs/path/to/vgi-airbyte/.venv/bin/vgi-airbyte-worker');
+ATTACH 'airbyte' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.1.0 vgi-airbyte-worker');
+
+-- What is in the registry, and under which licenses?
+SELECT name, version, license, license_policy
+FROM airbyte.main.connectors() WHERE manifest_only ORDER BY name;
+
+-- PokeAPI needs no key; its whole config is the pokemon to fetch.
+CREATE SECRET poke (TYPE airbyte, SCOPE 'airbyte://source-pokeapi', CONFIG '{"pokemon_name": "pikachu"}');
+
+-- ELv2-licensed: acknowledge the license to run it.
+SELECT id, name, base_experience, height, weight
+FROM airbyte.main.read_stream('source-pokeapi', 'pokemon', accept_license := 'ELv2');
 ```
 
-Now call the functions:
+From a source checkout: `make build`, then `LOCATION '/abs/path/to/.venv/bin/vgi-airbyte-worker'`.
 
-```sql
-SELECT airbyte.main.greet('Ada');                         -- Hi, Ada!
-SELECT airbyte.main.greet('Ada', 'formal');               -- Good day, Ada.
-SELECT * FROM airbyte.main.sequence_table(5, step := 2) ORDER BY n;
-```
+## Connectors
 
-`fetch_items` pages through a REST API. Try it against the public demo API (25 fixed items):
+The first argument of every connector function says which connector to run:
 
-```sql
-SELECT category, count(*) AS items, round(avg(price), 2) AS avg_price
-FROM airbyte.main.fetch_items('https://vgi-starter-api.query-farm.services/v1')
-GROUP BY category ORDER BY category;
-```
-
-If an older cached extension misbehaves, refresh it with `FORCE INSTALL vgi FROM query_farm;`
-(DuckDB) or `FORCE INSTALL vgi FROM community;` (Haybarn).
-
-## Using it in a pipeline
-
-Worker functions compose with everything else in DuckDB:
-
-```sql
--- Materialize an API into a local table.
-CREATE TABLE items AS SELECT * FROM airbyte.main.fetch_items('https://vgi-starter-api.query-farm.services/v1');
-
--- Join it with local files.
-SELECT i.name, i.price, s.units
-FROM items i JOIN 'sales.parquet' s ON s.item_id = i.id;
-
--- Call a scalar per row of another table.
-SELECT customer, airbyte.main.greet(customer, 'formal') FROM read_csv('customers.csv');
-```
-
-## Project layout
-
-```
-src/airbyte_worker/
-  worker.py        # assembles the catalog; add new functions to FUNCTIONS
-  meta.py          # catalog/schema metadata + helpers (object_tags, column)
-  greet.py         # scalar example (overloads, ConstParam choices)
-  sequence.py      # table function example (named args, streaming state)
-  fetch_items.py   # REST API table function (pagination, retries, secrets)
-tests/             # pytest unit tests (in-process client)
-test/sql/          # sqllogictest files run through DuckDB
-test/mock_api/     # offline mock of the REST API used by tests
-examples/          # recipes: pushdown, caching, catalog tables, aggregates, COPY …
-ci/                # integration harness used by `make test-sql` and CI
-scripts/           # vgi_template.py (init / template-diff)
-vgi-agent-tests.yaml  # private graders for the agent test tasks
-```
-
-## Adding a function
-
-1. Create `src/airbyte_worker/<name>.py`. Copy the closest example: `greet.py` for a
-   scalar, `sequence.py` for a generator, `fetch_items.py` for an API.
-2. Declare arguments with `Annotated[..., Param(...)]`/`ConstParam(...)` (scalars) or a
-   frozen dataclass of `Annotated[..., Arg(...)]` (table functions). Use `Arg(0, ...)`
-   for positional arguments and `Arg("name", default=...)` for named ones.
-3. Give the class a `class Meta` with `name`, `description`, `tags=object_tags(...)`
-   and `examples`.
-4. Add the class to `FUNCTIONS` in `src/airbyte_worker/worker.py`.
-
-**Which kind of function?**
-
-| You want to… | Use |
+| Reference | Runs |
 |---|---|
-| compute one value per input row | a **scalar** function |
-| return a set of rows from arguments (an API, a file, a generator) | a **table** function |
-| transform or aggregate the rows of a query | a **table in-out** function or an **aggregate** |
-| expose a fixed dataset by name (`SELECT * FROM airbyte.main.t`) | a **catalog table** |
-| write data out to a file or service | `COPY … TO` with a copy function |
-| accept `INSERT` / `UPDATE` / `DELETE` | a catalog table with insert/update/delete functions |
+| `source-pokeapi`, `pokeapi`, `source-pokeapi@0.3.79` | A registry connector at its current (or the given) version. Manifest-only connectors run through the CDK; the others run their Docker image. |
+| `/path/to/manifest.yaml`, `manifest:/path/to/file` | A local declarative manifest. |
+| `https://…/manifest.yaml` | A declarative manifest at a URL (versioned URLs are cached on disk). |
+| `docker:airbyte/source-faker:6.2.0` | Any image speaking the Airbyte protocol (`docker run --rm -i`). Needs a Docker daemon; without one the query fails with a clear error. |
+| `exec:/path/to/source` | A local executable speaking the Airbyte protocol. |
 
-The [examples/](examples/) folder has a recipe for most of these. Writable tables have no
-recipe:
+Registry lookups read `https://connectors.airbyte.com/files/registries/v0/oss_registry.json`
+(cached for an hour, and on disk for offline use). Manifest-only connectors' manifests are
+fetched from the same `/files/metadata/<image>/<version>/manifest.yaml` tree.
+`registry_url :=` points at a mirror with the same layout.
 
-A writable table is a catalog `Table` that names a table in-out function per operation in
-`insert_function`, `update_function` and `delete_function`, with the richest result each one
-produces in `write_result_modes`. The helpers in `vgi.write_results` (`write_options`,
-`write_result_schema`, `write_result_batch`, `row_id_field`) read DuckDB's `write_options`
-argument and build the result. UPDATE and DELETE need a scan function that emits
-`row_id_field()` and declares projection pushdown. Transactions: override `attach_supports_transactions`
-and `catalog_transaction_begin` / `_commit` / `_rollback` on the catalog. Since VGI protocol 3.3
-a table's scan and write functions are table-only: hidden from `duckdb_functions()` and not
-callable from SQL. Set `expose_scan=True` on the table to keep the scan callable as an ordinary
-table function too (write functions never are). See
-[Writable tables](https://github.com/Query-farm/vgi-python/blob/main/docs/catalog-interface.md#writable-tables)
-in the vgi-python docs.
+Manifests that reference custom Python components (`components.py`) run arbitrary code,
+so they only run with `allow_custom_code := true` (the worker then fetches the
+`components.py` next to the manifest and enables the CDK's `AIRBYTE_ENABLE_UNSAFE_CODE`).
+Otherwise run the connector's Docker image.
 
-## Secrets and configuration
+Environments and downloads live under `~/Library/Caches/vgi-airbyte` (macOS) or
+`$XDG_CACHE_HOME/vgi-airbyte`; set `VGI_AIRBYTE_CACHE_DIR` to move them. The CDK
+environment is created with `uv` (Python 3.13) when `uv` is on `PATH`, otherwise with
+`python -m venv` and `pip`. `cdk_version :=` selects another airbyte-cdk release.
 
-`fetch_items` shows the recommended pattern. A bearer token comes from a DuckDB secret
-when one exists, and from an environment variable otherwise:
+## Functions
+
+All in `airbyte.main`. Connector functions take the connector first plus the named
+arguments `secret_name`, `accept_license`, `allow_custom_code`, `cdk_version`,
+`registry_url` and `timeout_seconds`.
+
+| Function | Returns |
+|---|---|
+| `connectors(registry_url :=)` | One row per registry source: name, display name, image, version, language, `manifest_only`, release stage, support level, **license**, **license_policy**, source type, docs URL, manifest URL, tags. |
+| `spec(connector)` | The config the connector expects: required fields, `airbyte_secret` fields, each property's type/title/description/default, and the JSON Schema. Needs no secret. |
+| `check_connection(connector)` | Validates the config against the spec, then runs `check`: `SUCCEEDED` / `FAILED`, message, `config_valid`. |
+| `discover(connector)` | One row per stream: sync modes, cursor, primary key, columns with DuckDB types, JSON Schema. |
+| `catalog(connector)` | The whole AirbyteCatalog as `JSON` (one row), for `catalog_json :=` or ATTACH. |
+| `read_stream(connector, stream, state :=, sync_mode :=, cursor_field :=, catalog_json :=)` | The stream as a typed table. |
+| `final_state(connector, stream :=, state :=, catalog_json :=)` | Runs a sync and returns the merged final state, record and state-message counts, streams. |
+| `messages(connector, command :=, stream :=, state :=)` | Every raw AirbyteMessage (RECORD, STATE, LOG, TRACE, …) of `read`, `check`, `discover` or `spec`, decoded into columns. |
+| `json_schema_type(schema)` | Scalar: the DuckDB type a property's JSON Schema maps to. |
+
+### Secrets
 
 ```sql
-CREATE SECRET (TYPE airbyte_api, TOKEN 'your-token');      -- per session, never logged
+-- Bound to one connector by scope: 'airbyte://' + the connector argument as written.
+CREATE SECRET gh (TYPE airbyte, SCOPE 'airbyte://source-github', CONFIG '{"credentials": {...}, "repositories": ["duckdb/duckdb"]}');
+CREATE SECRET mine (TYPE airbyte, SCOPE 'airbyte:///srv/manifests/manifest.yaml', CONFIG '{"api_key": "..."}');
+-- Or chosen by name.
+SELECT * FROM airbyte.main.read_stream('source-github', 'issues', secret_name := 'gh');
 ```
 
-```bash
-AIRBYTE_API_TOKEN=your-token make run-http                # for servers and containers
-```
+The worker asks DuckDB for the `airbyte` secret whose scope best matches
+`airbyte://<connector>`; a secret without a scope applies to every connector. Without any
+secret the connector gets `{}`. Before the connector runs, the config is validated against
+its spec (from the manifest, the registry, or the connector's `spec` command); the error
+lists missing fields, wrong types, enum and range violations without quoting any value.
+The config is written to a 0600 file in a 0700 temporary directory (mounted read-only
+into Docker containers) and deleted when the connector exits. It never appears in scan
+state or logs, and `duckdb_secrets()` shows it redacted.
 
-Try it: the demo API's `/v1/auth` endpoint needs the published token `demo-token`.
+### License policy
+
+Running a connector means running its code, so every connector resolved from the
+registry is checked against its registry `license` first:
+
+| License | Policy |
+|---|---|
+| MIT, Apache-2.0, BSD, ISC, MIT-0, 0BSD | Runs. |
+| ELv2 (Elastic License 2.0; most Airbyte connectors) | Runs only with `accept_license := 'ELv2'` (or the `accept_license` ATTACH option). |
+| Airbyte Enterprise | Refused: it needs a commercial agreement with Airbyte. |
+| anything else, or none | Runs only with `accept_license :=` naming that exact license. |
+
+ELv2 lets you run a connector on your own data, but forbids providing it to third
+parties as a hosted or managed service. Acknowledging the license is your statement that
+your use fits it; if you deploy this worker as a shared HTTP service for others, ELv2
+connectors are likely out of bounds. Manifests, images and executables you name directly
+are your own choice of code and are not checked. The `license` and `license_policy`
+columns of `connectors()` show where each connector stands.
+
+### Attach a connector as a database
+
+Catalog discovery needs the connector's config, which catalog listing cannot see, so pass
+an Airbyte catalog at ATTACH (a file path, or the JSON itself):
 
 ```sql
-SELECT count(*) FROM airbyte.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- fails: HTTP 401
-CREATE SECRET (TYPE airbyte_api, TOKEN 'demo-token');
-SELECT count(*) FROM airbyte.main.fetch_items('https://vgi-starter-api.query-farm.services/v1/auth');   -- 25
+SET VARIABLE cat = (SELECT catalog::VARCHAR FROM airbyte.main.catalog('source-pokeapi', accept_license := 'ELv2'));
+ATTACH 'airbyte' AS poke (TYPE vgi, LOCATION '...', connector 'source-pokeapi', accept_license 'ELv2',
+                          catalog getvariable('cat'));
+SELECT name, base_experience FROM poke.pokemon;
 ```
 
-Never bake credentials into the image or the source. If a function can't run without
-real credentials, its examples can't execute in CI either. Set `execute: false` on the
-metadata check for that worker (see `.github/workflows/ci.yml`), and add
-`LINT_ARGS ?= --no-execute` to the Makefile so local runs match.
+Options: `connector`, `catalog`, `secret_name`, `accept_license`, `allow_custom_code`,
+`cdk_version`, `registry_url`, `timeout_seconds`. Each stream becomes a table in `main`
+(named `<namespace>_<stream>` when names collide); a scan runs `read_stream` with the
+attach's settings, so the same secret lookup, license policy, pushdown and resume apply.
+
+### Incremental reads
+
+```sql
+-- Sync once and keep the state.
+SET VARIABLE st = (SELECT final_state::VARCHAR FROM airbyte.main.final_state('source-x', stream := 'issues'));
+-- Next time, read only what changed since.
+SELECT * FROM airbyte.main.read_stream('source-x', 'issues', state := getvariable('st'));
+```
+
+`state :=` takes the protocol's JSON array of state messages (`STREAM`, `GLOBAL` or
+`LEGACY`), a single state message, or a bare legacy state object. `final_state` merges the
+run's STATE messages the way the Airbyte platform does: the latest state per stream, or
+the latest global / legacy state. `sync_mode := 'auto'` (the default) reads incrementally
+when the stream supports it, so the connector checkpoints; `'full_refresh'` re-reads
+everything and ignores `state`; `cursor_field :=` sets the cursor for sources without a
+default. Note that the current airbyte-cdk ignores `LEGACY` input state, so declarative
+manifests need per-stream state.
+
+## What pushes down
+
+- **Stream selection.** The configured catalog selects only the requested stream.
+- **Projection.** The selected stream's `json_schema` keeps only the queried columns plus
+  the primary key and cursor, which is how the Airbyte platform expresses column
+  selection. Most connectors still fetch whole records; the worker drops the rest.
+- **Incremental cursor.** `state :=` is passed as `--state`; declarative connectors turn
+  it into the API's own filter (e.g. `updated_since=` request parameters).
+- **LIMIT** stops reading early: once DuckDB stops pulling, the connector blocks on its
+  pipe and is stopped after 10 idle minutes or when the worker exits.
+- **Filters** do not push down: the Airbyte protocol has no filter language. Use
+  `state :=` to start from a cursor.
+
+## Type mapping
+
+| JSON Schema | DuckDB |
+|---|---|
+| `integer`, or `number` + `airbyte_type: integer` | `BIGINT` |
+| `number` | `DOUBLE` |
+| `boolean` | `BOOLEAN` |
+| `string` (also `airbyte_type: big_integer`) | `VARCHAR` |
+| `string`, `format: date-time` | `TIMESTAMP WITH TIME ZONE` (offset-less values are UTC) |
+| … + `airbyte_type: timestamp_without_timezone` | `TIMESTAMP` |
+| `string`, `format: date` / `time` | `DATE` / `TIME` |
+| `object` with `properties`, no extra keys | `STRUCT(...)`, up to 4 levels deep |
+| `array` with `items` | `LIST` of the item type |
+| open objects, several types, no type | `JSON` |
+
+Every column is nullable. A value that does not fit its column becomes NULL and the count
+is logged to stderr. Keys not declared in a STRUCT are dropped; use a `JSON` property to
+keep everything.
+
+## How scans run and resume
+
+The connector runs as a subprocess (`source-declarative-manifest`, `docker run`, or the
+executable). A reader thread moves its stdout into a bounded queue and rows go to DuckDB
+in batches of up to 1,000, or sooner when the connector is slow. Non-JSON stdout lines are
+skipped. An `ERROR` TRACE message fails the query with the connector's message (and its
+internal message) once the connector exits; otherwise a non-zero exit quotes the last
+ERROR/FATAL log or stderr. A connector that prints nothing for `timeout_seconds` (default
+300; 0 disables) is stopped; Docker containers are removed with `docker rm -f`.
+
+The scan cursor holds the cumulative Airbyte state and the number of rows read after the
+last STATE, never the config. In one worker process the connector keeps running between
+batches. If a batch lands on another process (HTTP deployments), the connector is
+restarted with `--state <cumulative state>` and the rows already returned after that
+checkpoint are skipped. This relies on the connector replaying the same records from the
+same state (the Airbyte checkpointing contract); a connector that returns fewer records
+on resume fails the scan rather than silently dropping rows.
 
 ## Testing
 
-```bash
-make test-unit                 # fast Python unit tests
-make test-sql                  # test/sql/*.test through DuckDB (stdio)
-make test-sql TRANSPORT=http   # …over HTTP (also: launch)
-make check                     # everything CI runs
-```
+`make check` runs ruff, mypy, pydoclint, the unit tests, the SQL suite over stdio,
+launch and HTTP transports, and the metadata lint. CI needs no Docker and no network
+beyond PyPI (for the pinned airbyte-cdk).
 
-`test/sql/*.test` files are [sqllogictest](https://duckdb.org/docs/stable/dev/sqllogictest/intro)
-scripts. `ci/run-integration.sh` runs them against your worker and fails on any
-unexpected skip, so a broken transport can't hide behind a green run.
-`fetch_items` is tested against `test/mock_api/server.py` so tests are fast and
-offline.
-
-**Testing against real data:** put live tests in their own `.test` file that starts with
-`require-env AIRBYTE_LIVE`. They run only when that variable is set. Add the skip reason
-to `EXPECTED_SKIP_REASONS` in CI.
-
-## Metadata and the quality score
-
-DuckDB, agents and documentation tools discover your functions through their metadata:
-titles, descriptions, argument docs, examples and keywords.
-[vgi-lint](https://github.com/Query-farm/vgi-lint-check) checks it, and CI runs it on
-every push. Its settings live in `vgi-lint.toml`, which `make lint-explain`,
-`vgi-lint lint`, and CI all read. This template scores 100/100 with no findings.
-
-```bash
-make lint-explain                              # findings, each with its fix
-make lint-explain LINT_ARGS="--format agent"   # the same, grouped for coding agents
-make lint-ai                                   # optional: an agent must solve vgi-agent-tests.yaml
-```
-
-Each report also states an **assurance level**: how much was actually verified.
-
-| Level | Reached when | Here |
-|---|---|---|
-| L1 structural | the static metadata is clean | workers that need real credentials (`execute: false` in CI) |
-| L2 behavioural | the examples also run and return what they claim | **the CI gate** |
-| L3 semantic | an agent solves the worker's own test tasks, and the docs are reviewed | `make lint-ai`, before publishing |
-
-- **How strict.** Your copy fails on warnings (`fail_on = "warning"` in `vgi-lint.toml`).
-  Raise it to `"info"` before you publish the worker for others.
-- **The linter isn't pinned.** It tracks the current quality bar, so a new rule can flag
-  metadata that passed yesterday. Fix it, or waive the finding.
-- **Waivers.** If a finding is genuinely wrong for your worker, waive it in
-  `vgi-lint.toml` with a `kind` and a `reason`.
-- **Existing workers.** If you're adding this gate to a worker that already has
-  findings, record them with `vgi-lint lint --baseline vgi-lint-baseline --update-baseline`
-  and set `baseline` in `vgi-lint.toml`. After that, only new findings fail.
-
-Metadata lives in `src/airbyte_worker/meta.py` and each function's `class Meta`.
-
-## Logging and debugging
-
-stdout carries the Arrow protocol, so **never print to stdout**. Log to stderr instead.
-Use the standard `logging` module (the SDK routes it to stderr); `--debug` or `--log-level DEBUG` turns it up.
-
-- Under DuckDB (stdio/launch), worker stderr shows up in DuckDB's error messages and
-  terminal.
-- In Docker it goes to `docker logs`.
-- `make debug` runs one query against the worker with debug logging on.
-
-## Deploying
-
-The same binary serves stdio (DuckDB starts it locally) or HTTP (you host it):
-
-```bash
-docker build -t weather-worker .
-docker run -p 8000:8000 -e AIRBYTE_API_TOKEN=... weather-worker   # health: GET /health
-```
-
-```sql
-ATTACH 'airbyte' (TYPE vgi, LOCATION 'https://workers.example.com/airbyte');
-```
-
-Put hosted workers behind TLS and authentication. See
-[authentication](https://query.farm/vgi/authentication) for bearer tokens and JWTs, and
-[distributing a worker](https://query.farm/vgi/distributing-a-worker) for packaging.
-Pass secrets with `-e` or your platform's secret manager.
-
-## Releasing
-
-Push a tag like `v0.1.0`. The release workflow builds the wheel and sdist, attaches them to the GitHub release, and (if you set the repository variable `PYPI_PUBLISH=true` and configure PyPI Trusted Publishing) publishes to PyPI, so users can run `uvx vgi-airbyte-worker`. Without PyPI, users install straight from the repo with `uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.1.0 vgi-airbyte-worker`. Every artifact is signed with cosign and
-carries SLSA build provenance. `ci/check-version.sh` makes sure the tag matches the
-version in `pyproject.toml`.
-
-## Using with coding agents
-
-[AGENTS.md](AGENTS.md) is written for AI coding agents (Claude Code reads it via
-`CLAUDE.md`; Codex, Cursor and others read it directly). It covers the commands, the
-recipe for adding a function, the metadata checklist and the sharp edges. A good first
-prompt:
-
-> Read AGENTS.md. Replace `fetch_items` with `forecast(lat DOUBLE, lon DOUBLE)` that calls
-> the Open-Meteo API. Include full metadata, a mock-server test and a `AIRBYTE_LIVE` test.
-> You're done when `make check` passes.
-
-## Keeping up with the template
-
-`make template-diff` shows what changed upstream (CI, docs, examples) since your copy was
-made. Your copy records its template version in `.vgi-airbyte.json`.
-
-## Learn more
-
-- [What is VGI?](https://query.farm/vgi) · [Getting started](https://query.farm/vgi/getting-started) · [Building a worker](https://query.farm/vgi/building-a-worker)
-- [Python SDK docs](https://query.farm/vgi/docs/python/): [scalar tutorial](https://query.farm/vgi/docs/python/tutorial/scalar/), [table tutorial](https://query.farm/vgi/docs/python/tutorial/table/)
-- [Distributing a worker](https://query.farm/vgi/distributing-a-worker) · [Choosing a language](https://query.farm/vgi/languages) · [llms.txt](https://query.farm/vgi/llms.txt)
-- SDK source: [vgi-python](https://github.com/Query-farm/vgi-python) · RPC layer: [https://vgi-rpc-python.query.farm](https://vgi-rpc-python.query.farm)
+- `test/fixture_api/server.py` is a hermetic REST API with bearer auth, cursor and offset
+  pagination, an `updated_since` filter and a 403 endpoint, plus a mirror of the registry
+  layout (`test/fixtures/oss_registry.json`: MIT, ELv2, Enterprise, custom-code and
+  Docker-only fixture connectors).
+- `test/fixtures/manifest.yaml` is a declarative manifest against it (pagination, auth,
+  an incremental `DatetimeBasedCursor`), run through the real airbyte-cdk.
+- `test/fake_source/source-fake` is a hermetic Airbyte-protocol executable: spec / check /
+  discover / read, per-stream, global and legacy state, LOG and TRACE errors, Airbyte
+  types, and a log of the configured catalog it received.
+- Opt-in: `AIRBYTE_TEST_DOCKER=1 make test-sql` builds `test/fake_source/Dockerfile` and
+  runs `test/sql/docker.test` through Docker mode; `AIRBYTE_LIVE=1 make test-sql` runs
+  `test/sql/live.test` against the real registry and the PokeAPI connector. Both are
+  expected skips otherwise.
+- The metadata lint runs with execution disabled (`vgi-lint.toml`): every connector
+  example needs network access and usually connector credentials.
 
 ## Support
 
-Open an issue on this repository. For VGI itself, see [query.farm](https://query.farm).
+Open an issue at https://github.com/Query-farm/vgi-airbyte/issues.
 
-## Authorship & license
+## Authorship & License
 
-The starter template is written by [Query.Farm](https://query.farm) and released under
-the [BSD Zero Clause License](LICENSE) (0BSD). Use it for anything, with no attribution
-required. Replace this section with your own license once the code is yours.
+Copyright 2026 Query Farm LLC - https://query.farm
+
+Licensed under the BSD Zero Clause License (0BSD); see [LICENSE](LICENSE). Airbyte
+connectors are licensed separately by their authors (see `connectors()`).

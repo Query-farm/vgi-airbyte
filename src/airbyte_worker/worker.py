@@ -1,7 +1,6 @@
 """Assemble the functions into a catalog and run the worker.
 
-To add a function: write it (see ``greet.py`` / ``sequence.py`` /
-``fetch_items.py``), then add the class to ``FUNCTIONS`` below.
+To add a function: write it, then add the class to ``FUNCTIONS`` below.
 
 Run it:
 
@@ -12,31 +11,51 @@ Run it:
 Attach it from DuckDB:
 
     ATTACH 'airbyte' (TYPE vgi, LOCATION '/abs/path/to/.venv/bin/vgi-airbyte-worker');
+    ATTACH 'airbyte' AS poke (TYPE vgi, LOCATION '...', connector 'source-pokeapi',
+                              accept_license 'ELv2', catalog '/path/catalog.json');
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
 from vgi import Worker
 from vgi.catalog import Catalog, Schema
+from vgi.catalog.attach_option import AttachOption
 
-from .fetch_items import API_SECRET_TYPE, FetchItems
-from .greet import Greet, GreetWithStyle
+from .catalog import ConnectorCatalog
+from .common import AIRBYTE_SECRET_TYPE
+from .connector import DEFAULT_CDK_VERSION, DEFAULT_TIMEOUT_SECONDS
+from .inspect_fns import CatalogJson, Check, Discover, Spec
+from .listing import Connectors
 from .meta import (
-    CATALOG_DOC_MD,
+    CATALOG_COMMENT,
     CATALOG_NAME,
     CATALOG_TAGS,
     SCHEMA_CATEGORIES,
+    SCHEMA_COMMENT,
     SCHEMA_DOC_LLM,
     SCHEMA_DOC_MD,
     SOURCE_URL,
     keywords_array,
 )
-from .sequence import SequenceTable
+from .raw import Messages
+from .read_stream import FinalState, ReadStream
+from .registry import DEFAULT_REGISTRY_URL
+from .schema_type import JsonSchemaType
 
-FUNCTIONS: list[type[Any]] = [Greet, GreetWithStyle, SequenceTable, FetchItems]
+FUNCTIONS: list[type[Any]] = [
+    Connectors,
+    Spec,
+    Check,
+    Discover,
+    CatalogJson,
+    ReadStream,
+    FinalState,
+    Messages,
+    JsonSchemaType,
+]
 
 
 def _stamp_example_queries(functions: list[type[Any]]) -> list[dict[str, str]]:
@@ -60,23 +79,25 @@ def _stamp_example_queries(functions: list[type[Any]]) -> list[dict[str, str]]:
 _ALL_EXAMPLES = _stamp_example_queries(FUNCTIONS)
 
 
-class AirbyteWorker(Worker):
-    """The worker process: one catalog, one ``main`` schema."""
+class AirbyteCatalog(ConnectorCatalog):
+    """The ``airbyte`` catalog: the functions, plus one table per stream of an attached connector."""
 
     catalog = Catalog(
         name=CATALOG_NAME,
-        comment=CATALOG_DOC_MD,
+        comment=CATALOG_COMMENT,
         source_url=SOURCE_URL,
         tags=CATALOG_TAGS,
         schemas=[
             Schema(
                 path=["main"],
-                comment=SCHEMA_DOC_MD,
+                comment=SCHEMA_COMMENT,
                 functions=FUNCTIONS,
                 tags={
-                    "vgi.title": "Airbyte Functions",
-                    "domain": "examples",
-                    "vgi.keywords": keywords_array("greeting, sequence, generator, rest api, pagination"),
+                    "vgi.title": "Airbyte Connector Functions",
+                    "domain": "data integration",
+                    "vgi.keywords": keywords_array(
+                        "airbyte, connectors, registry, spec, check, discover, read, state, manifest"
+                    ),
                     "vgi.doc_llm": SCHEMA_DOC_LLM,
                     "vgi.doc_md": SCHEMA_DOC_MD,
                     "vgi.categories": json.dumps(SCHEMA_CATEGORIES),
@@ -86,7 +107,49 @@ class AirbyteWorker(Worker):
         ],
     )
 
-    secret_types = [API_SECRET_TYPE]
+
+class AirbyteWorker(Worker):
+    """The worker process: the ``airbyte`` catalog, its secret type and ATTACH options."""
+
+    catalog_interface = AirbyteCatalog
+    catalog_name = CATALOG_NAME
+    secret_types = [AIRBYTE_SECRET_TYPE]
+
+    class AttachOptions:
+        """Options for ``ATTACH 'airbyte' AS name (TYPE vgi, LOCATION ..., connector '...', catalog '...')``."""
+
+        connector: Annotated[
+            str,
+            AttachOption(
+                desc="Connector reference (registry name, manifest path/URL, docker:image, exec:path). "
+                "With catalog, every stream becomes a table."
+            ),
+        ] = ""
+        catalog: Annotated[
+            str,
+            AttachOption(desc="Airbyte catalog for the connector: a file path or the catalog JSON itself."),
+        ] = ""
+        secret_name: Annotated[
+            str,
+            AttachOption(
+                desc="Name of the airbyte secret with the config; empty uses the 'airbyte://<connector>' scope."
+            ),
+        ] = ""
+        accept_license: Annotated[
+            str, AttachOption(desc="Acknowledge a registry connector's non-permissive license, e.g. 'ELv2'.")
+        ] = ""
+        allow_custom_code: Annotated[
+            bool, AttachOption(desc="Allow the manifest's custom Python components (components.py) to run.")
+        ] = False
+        cdk_version: Annotated[str, AttachOption(desc="airbyte-cdk version that runs declarative manifests.")] = (
+            DEFAULT_CDK_VERSION
+        )
+        registry_url: Annotated[str, AttachOption(desc="Connector registry JSON used to resolve registry names.")] = (
+            DEFAULT_REGISTRY_URL
+        )
+        timeout_seconds: Annotated[
+            int, AttachOption(desc="Stop a connector that prints nothing for this many seconds; 0 waits forever.")
+        ] = DEFAULT_TIMEOUT_SECONDS
 
 
 def main() -> None:

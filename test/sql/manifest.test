@@ -1,0 +1,173 @@
+# name: test/sql/manifest.test
+# description: A declarative manifest (test/fixtures/manifest.yaml) against the hermetic fixture API
+# group: [airbyte]
+
+require vgi
+
+require-env AIRBYTE_WORKER
+
+require-env AIRBYTE_FIXTURE_API
+
+require-env AIRBYTE_FIXTURES
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'airbyte' (TYPE vgi, LOCATION '{AIRBYTE_WORKER}');
+
+statement ok
+CREATE SECRET fixture (TYPE airbyte,
+  CONFIG '{"base_url": "{AIRBYTE_FIXTURE_API}", "api_token": "fixture-token", "page_size": 4}',
+  SCOPE 'airbyte://{AIRBYTE_FIXTURES}/manifest.yaml');
+
+# ----------------------------------------------------------------------- spec
+
+query TTTT
+SELECT connector, mode, required, secret_fields FROM airbyte.main.spec('{AIRBYTE_FIXTURES}/manifest.yaml');
+----
+manifest.yaml	manifest	[base_url, api_token]	[api_token]
+
+query TTTT
+SELECT p.name, p.type, p.required, p.secret FROM (
+  SELECT unnest(properties) AS p FROM airbyte.main.spec('{AIRBYTE_FIXTURES}/manifest.yaml')) ORDER BY p.name;
+----
+api_token	string	true	true
+base_url	string	true	false
+page_size	integer	false	false
+start_date	string	false	false
+
+# ---------------------------------------------------------------------- check
+
+query TT
+SELECT status, config_valid FROM airbyte.main.check_connection('{AIRBYTE_FIXTURES}/manifest.yaml');
+----
+SUCCEEDED	true
+
+# --------------------------------------------------------------------- discover
+
+query TTTTT
+SELECT stream, supported_sync_modes, default_cursor_field, primary_key, table_name
+FROM airbyte.main.discover('{AIRBYTE_FIXTURES}/manifest.yaml') ORDER BY stream;
+----
+forbidden	[full_refresh]	NULL	[]	forbidden
+items	[full_refresh, incremental]	[updated_at]	[id]	items
+users	[full_refresh]	NULL	[user_id]	users
+
+query TT
+SELECT c.name, c.type FROM (
+  SELECT unnest(columns) AS c FROM airbyte.main.discover('{AIRBYTE_FIXTURES}/manifest.yaml') WHERE stream = 'items');
+----
+id	BIGINT
+name	VARCHAR
+price	DOUBLE
+in_stock	BOOLEAN
+updated_at	TIMESTAMP WITH TIME ZONE
+tags	VARCHAR[]
+dims	STRUCT("w" BIGINT, "h" BIGINT)
+attributes	JSON
+
+query I
+SELECT streams FROM airbyte.main.catalog('{AIRBYTE_FIXTURES}/manifest.yaml');
+----
+3
+
+# ------------------------------------------------------------------ read_stream
+
+# Cursor pagination (page_size 4 -> 7 pages) and the default start_date.
+query IIRI
+SELECT count(*), min(id), sum(price), max(id) FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items');
+----
+25	1	406.25	25
+
+query ITRTTITT
+SELECT id, name, price, in_stock::VARCHAR, epoch(updated_at)::BIGINT::VARCHAR, dims.h, tags[1], attributes->>'$.color'
+FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items') WHERE id IN (1, 3) ORDER BY id;
+----
+1	item-01	1.25	true	1767225600	2	t1	green
+3	item-03	3.75	false	1767232800	6	t3	red
+
+query T
+SELECT typeof(updated_at) FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items') LIMIT 1;
+----
+TIMESTAMP WITH TIME ZONE
+
+# Offset pagination, full refresh.
+query TTT
+SELECT user_id, email, admin::VARCHAR FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'users') ORDER BY user_id;
+----
+u1	user1@example.com	true
+u2	user2@example.com	false
+u3	user3@example.com	false
+u4	user4@example.com	false
+u5	user5@example.com	false
+u6	user6@example.com	false
+u7	user7@example.com	false
+
+# Incremental: a stream state makes the connector send updated_since and read only newer items.
+query II
+SELECT count(*), min(id) FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items',
+  state := '[{"type": "STREAM", "stream": {"stream_descriptor": {"name": "items"}, "stream_state": {"updated_at": "2026-01-01T20:00:00Z"}}}]');
+----
+5	21
+
+# full_refresh ignores the state.
+query I
+SELECT count(*) FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items', sync_mode := 'full_refresh',
+  state := '[{"type": "STREAM", "stream": {"stream_descriptor": {"name": "items"}, "stream_state": {"updated_at": "2026-01-01T20:00:00Z"}}}]');
+----
+25
+
+# ------------------------------------------------------------------ final_state
+
+query ITTT
+SELECT records, streams, state_type, final_state->>'$[0].stream.stream_state.updated_at'
+FROM airbyte.main.final_state('{AIRBYTE_FIXTURES}/manifest.yaml', stream := 'items');
+----
+25	[items]	STREAM	2026-01-02T00:00:00Z
+
+# The final state feeds the next incremental read: nothing newer than the last item except itself.
+statement ok
+SET VARIABLE items_state = (SELECT final_state::VARCHAR FROM airbyte.main.final_state('{AIRBYTE_FIXTURES}/manifest.yaml', stream := 'items',
+  state := '[{"type": "STREAM", "stream": {"stream_descriptor": {"name": "items"}, "stream_state": {"updated_at": "2026-01-01T23:00:00Z"}}}]'));
+
+query I
+SELECT count(*) FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'items', state := getvariable('items_state'));
+----
+1
+
+# --------------------------------------------------------------------- messages
+
+query TI
+SELECT type, count(*) > 0 FROM airbyte.main.messages('{AIRBYTE_FIXTURES}/manifest.yaml', stream := 'users')
+WHERE type IN ('RECORD', 'TRACE', 'LOG') GROUP BY type ORDER BY type;
+----
+LOG	1
+RECORD	1
+TRACE	1
+
+query TT
+SELECT stream_status, stream FROM airbyte.main.messages('{AIRBYTE_FIXTURES}/manifest.yaml', stream := 'users')
+WHERE stream_status IS NOT NULL ORDER BY seq;
+----
+STARTED	users
+RUNNING	users
+COMPLETE	users
+
+query TT
+SELECT type, message->>'$.spec.connectionSpecification.title' FROM airbyte.main.messages('{AIRBYTE_FIXTURES}/manifest.yaml', command := 'spec');
+----
+SPEC	Fixture API Spec
+
+# ---------------------------------------------------------------------- errors
+
+# The upstream 403 surfaces as the connector's TRACE error.
+statement error
+SELECT * FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'forbidden');
+----
+<REGEX>:.*manifest.yaml failed.*403.*
+
+statement error
+SELECT * FROM airbyte.main.read_stream('{AIRBYTE_FIXTURES}/manifest.yaml', 'nope');
+----
+<REGEX>:.*no stream named 'nope'.*streams: forbidden, items, users.*

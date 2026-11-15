@@ -43,11 +43,10 @@ jobs:
       fail-fast: false
       matrix:
         # macOS minutes cost 10x on private repos; add macos-latest here when you need it.
-        os: [ubuntu-latest, windows-latest]
+        # No Windows lane: connectors run as POSIX subprocesses (the airbyte-cdk
+        # environment, the fake protocol executable and Docker mode all assume POSIX).
+        os: [ubuntu-latest]
         transport: [stdio, launch, http]
-        exclude:
-          - os: windows-latest
-            transport: launch   # the launcher uses AF_UNIX sockets
     defaults:
       run:
         shell: bash
@@ -96,8 +95,13 @@ jobs:
           location: ${{ github.workspace }}/.venv/bin/vgi-airbyte-worker
           # Set in vgi-lint.toml, so local runs and CI agree.
           fail-on: ${{ steps.lintcfg.outputs.fail_on }}
-          # Set to false if your examples need real credentials or network access.
-          execute: true
+          # execute:false - credential/network-gated. Every connector function
+          # (airbyte.main.spec / check_connection / discover / catalog / read_stream /
+          # final_state / messages) downloads a third-party connector from the Airbyte
+          # registry (or runs its Docker image) and needs that connector's config,
+          # usually API credentials, in an `airbyte` secret; airbyte.main.connectors
+          # needs the live registry. Behaviour is covered by the hermetic SQL suite.
+          execute: "false"
 
   docker:
     name: Docker image smoke test

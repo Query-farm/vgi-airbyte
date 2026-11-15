@@ -1,0 +1,29 @@
+# A manifest that references custom Python components (components.py).
+version: 6.44.0
+type: DeclarativeSource
+check:
+  type: CheckStream
+  stream_names: [things]
+streams:
+  - type: DeclarativeStream
+    name: things
+    retriever:
+      type: SimpleRetriever
+      requester:
+        type: HttpRequester
+        url_base: "{{ config['base_url'] }}"
+        path: /api/v1/users
+      record_selector:
+        type: RecordSelector
+        extractor:
+          type: CustomRecordExtractor
+          class_name: source_declarative_manifest.components.ThingExtractor
+    schema_loader:
+      type: InlineSchemaLoader
+      schema: {type: object, properties: {user_id: {type: string}}}
+spec:
+  type: Spec
+  connection_specification:
+    type: object
+    properties:
+      base_url: {type: string}

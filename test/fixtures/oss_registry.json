@@ -1,0 +1,152 @@
+{
+ "destinations": [],
+ "sources": [
+  {
+   "name": "Fixture API",
+   "dockerRepository": "airbyte/source-fixture",
+   "dockerImageTag": "0.1.0",
+   "documentationUrl": "https://docs.example.com/source-fixture",
+   "sourceDefinitionId": "00000000-0000-4000-8000-000000000001",
+   "releaseStage": "generally_available",
+   "supportLevel": "certified",
+   "license": "MIT",
+   "language": "manifest-only",
+   "tags": [
+    "language:manifest-only",
+    "cdk:low-code"
+   ],
+   "sourceType": "api",
+   "public": true,
+   "custom": false,
+   "tombstone": false,
+   "spec": {
+    "connectionSpecification": {
+     "type": "object",
+     "required": [
+      "base_url",
+      "api_token"
+     ],
+     "properties": {
+      "base_url": {
+       "type": "string"
+      },
+      "api_token": {
+       "type": "string",
+       "airbyte_secret": true
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "Fixture API (ELv2)",
+   "dockerRepository": "airbyte/source-fixture-elv2",
+   "dockerImageTag": "0.2.0",
+   "documentationUrl": "https://docs.example.com/source-fixture-elv2",
+   "sourceDefinitionId": "00000000-0000-4000-8000-000000000002",
+   "releaseStage": "alpha",
+   "supportLevel": "community",
+   "license": "ELv2",
+   "language": "manifest-only",
+   "tags": [
+    "language:manifest-only",
+    "cdk:low-code"
+   ],
+   "sourceType": "api",
+   "public": true,
+   "custom": false,
+   "tombstone": false,
+   "spec": {
+    "connectionSpecification": {
+     "type": "object",
+     "required": [
+      "base_url",
+      "api_token"
+     ],
+     "properties": {
+      "base_url": {
+       "type": "string"
+      },
+      "api_token": {
+       "type": "string",
+       "airbyte_secret": true
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "Fixture With Custom Code",
+   "dockerRepository": "airbyte/source-fixture-custom",
+   "dockerImageTag": "1.0.0",
+   "documentationUrl": "https://docs.example.com/source-fixture-custom",
+   "sourceDefinitionId": "00000000-0000-4000-8000-000000000003",
+   "releaseStage": "alpha",
+   "supportLevel": "community",
+   "license": "MIT",
+   "language": "manifest-only",
+   "tags": [
+    "language:manifest-only",
+    "cdk:low-code"
+   ],
+   "sourceType": "api",
+   "public": true,
+   "custom": false,
+   "tombstone": false,
+   "spec": {
+    "connectionSpecification": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  },
+  {
+   "name": "Docker Only",
+   "dockerRepository": "airbyte/source-dockeronly",
+   "dockerImageTag": "2.1.0",
+   "documentationUrl": "https://docs.example.com/source-dockeronly",
+   "sourceDefinitionId": "00000000-0000-4000-8000-000000000004",
+   "releaseStage": "beta",
+   "supportLevel": "community",
+   "license": "Apache-2.0",
+   "language": "python",
+   "tags": [
+    "language:python"
+   ],
+   "sourceType": "api",
+   "public": true,
+   "custom": false,
+   "tombstone": false,
+   "spec": {
+    "connectionSpecification": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  },
+  {
+   "name": "Fake Enterprise",
+   "dockerRepository": "airbyte/source-fake-enterprise",
+   "dockerImageTag": "0.9.0",
+   "documentationUrl": "https://docs.example.com/source-fake-enterprise",
+   "sourceDefinitionId": "00000000-0000-4000-8000-000000000005",
+   "releaseStage": "alpha",
+   "supportLevel": "certified",
+   "license": "Airbyte Enterprise",
+   "language": "java",
+   "tags": [
+    "language:java"
+   ],
+   "sourceType": "api",
+   "public": true,
+   "custom": false,
+   "tombstone": false,
+   "spec": {
+    "connectionSpecification": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  }
+ ]
+}

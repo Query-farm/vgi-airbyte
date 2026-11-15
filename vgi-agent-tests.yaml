@@ -1,16 +1,54 @@
 # Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
-# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it with reference_sql.
 # See https://github.com/Query-farm/vgi-lint-check (VGI920).
+# The connector tasks use the live Airbyte registry and the keyless PokeAPI connector
+# (network required); the type-mapping tasks run offline.
 tasks:
-  - name: formal_greeting
-    reference_sql: SELECT airbyte.main.greet('Grace', 'formal') AS greeting
-  - name: sum_of_squares
-    reference_sql: SELECT sum(squared) AS total FROM airbyte.main.sequence_table(10)
-  - name: stepped_sequence
-    reference_sql: SELECT n FROM airbyte.main.sequence_table(4, step := 5) ORDER BY n
-  # Reads the public demo API (https://vgi-starter-api.query-farm.services/v1).
-  - name: items_per_category
-    check_sql: >-
-      SELECT count(*) = 3 AND sum(items) = 25
-      FROM (SELECT category, count(*) AS items
-            FROM airbyte.main.fetch_items('https://vgi-starter-api.query-farm.services/v1') GROUP BY category)
+  - name: datetime_type
+    reference_sql: >-
+      SELECT airbyte.main.json_schema_type('{"type": ["null", "string"], "format": "date-time", "airbyte_type": "timestamp_without_timezone"}') AS duckdb_type
+  - name: big_integer_type
+    reference_sql: >-
+      SELECT airbyte.main.json_schema_type('{"type": "string", "airbyte_type": "big_integer"}') AS duckdb_type
+  - name: pokeapi_license
+    reference_sql: >-
+      SELECT license, license_policy FROM airbyte.main.connectors() WHERE name = 'source-pokeapi'
+  - name: pokeapi_required_config
+    reference_sql: >-
+      SELECT unnest(required) AS field FROM airbyte.main.spec('source-pokeapi', accept_license := 'ELv2')
+  - name: pokeapi_check
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT status FROM airbyte.main.check_connection('source-pokeapi', accept_license := 'ELv2')
+  - name: pokeapi_streams
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT stream, primary_key FROM airbyte.main.discover('source-pokeapi', accept_license := 'ELv2') ORDER BY stream
+  - name: pokeapi_catalog_size
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT streams FROM airbyte.main.catalog('source-pokeapi', accept_license := 'ELv2')
+  - name: pokeapi_pikachu
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT id, base_experience, height, weight FROM airbyte.main.read_stream('source-pokeapi', 'pokemon', accept_license := 'ELv2')
+  - name: pokeapi_sync_records
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT records FROM airbyte.main.final_state('source-pokeapi', accept_license := 'ELv2')
+  - name: pokeapi_record_messages
+    reference_sql:
+      - >-
+        CREATE OR REPLACE SECRET poke (TYPE airbyte, CONFIG '{"pokemon_name": "pikachu"}', SCOPE 'airbyte://source-pokeapi')
+      - >-
+        SELECT count(*) AS record_messages FROM airbyte.main.messages('source-pokeapi', stream := 'pokemon', accept_license := 'ELv2') WHERE type = 'RECORD'
