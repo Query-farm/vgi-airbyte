@@ -91,11 +91,11 @@ CATALOG_DOC_LLM = (
     "cached environment; other registry connectors run their Docker image. License policy: MIT/Apache "
     "connectors run; ELv2 connectors (most of the registry) need accept_license := 'ELv2'; 'Airbyte "
     "Enterprise' connectors are refused. The connector config JSON comes only from a DuckDB secret of type "
-    "`airbyte` scoped to 'airbyte://<connector>' and is validated against the connector's spec. Functions: "
-    "connectors() lists the registry with licenses, spec/check_connection/discover/catalog inspect a connector, "
-    "read_stream returns one stream as rows (columns from its JSON Schema; STATE is the resumable scan "
-    "cursor; state := starts an incremental read), final_state returns the state to resume from, and "
-    "messages returns raw protocol messages. ATTACH with `connector` and `catalog` options exposes every "
+    "`airbyte` scoped to 'airbyte://<connector>' and is validated against the connector's spec. Workflow: "
+    "browse the registry (with licenses), inspect a connector's spec, check its connection and discover "
+    "its streams, then read a stream as rows - columns come from the stream's JSON Schema, Airbyte STATE "
+    "is the resumable scan cursor, and passing a saved state starts an incremental read. Raw protocol "
+    "messages are available for debugging. ATTACH with `connector` and `catalog` options exposes every "
     "stream as a table."
 )
 
