@@ -79,7 +79,7 @@ Otherwise run the connector's Docker image.
 
 Environments and downloads live under `~/Library/Caches/vgi-airbyte` (macOS) or
 `$XDG_CACHE_HOME/vgi-airbyte`; set `VGI_AIRBYTE_CACHE_DIR` to move them. The CDK
-environment is created with `uv` (Python 3.13) when `uv` is on `PATH`, otherwise with
+environment is created with `uv` (Python 3.14) when `uv` is on `PATH`, otherwise with
 `python -m venv` and `pip`. `cdk_version :=` selects another airbyte-cdk release.
 
 ## Functions

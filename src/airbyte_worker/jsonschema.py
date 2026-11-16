@@ -255,7 +255,7 @@ class Coercer:
                 return None
             try:
                 return fn(v)
-            except (TypeError, ValueError, OverflowError):
+            except TypeError, ValueError, OverflowError:
                 self.rejected += 1
                 return None
 

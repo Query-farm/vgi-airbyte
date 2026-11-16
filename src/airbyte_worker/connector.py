@@ -351,7 +351,7 @@ def docker_available() -> bool:
                     check=False,
                 )
                 _docker_ok = proc.returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
+            except OSError, subprocess.TimeoutExpired:
                 _docker_ok = False
     return _docker_ok
 

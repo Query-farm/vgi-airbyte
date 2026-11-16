@@ -92,7 +92,7 @@ CATALOG = {
         },
     ]
 }
-START = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+START = dt.datetime(2026, 3, 1, tzinfo=dt.timezone.utc)
 
 
 def emit(msg):
