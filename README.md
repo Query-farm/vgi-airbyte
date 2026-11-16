@@ -39,7 +39,7 @@ DuckDB, and returns their streams as typed tables.
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'airbyte' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.1.0 vgi-airbyte-worker');
+ATTACH 'airbyte' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.1.1 vgi-airbyte-worker');
 
 -- What is in the registry, and under which licenses?
 SELECT name, version, license, license_policy
