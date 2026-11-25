@@ -34,12 +34,14 @@ DuckDB, and returns their streams as typed tables.
 - **Incremental and resumable.** Airbyte STATE (per-stream, global or legacy) is the scan
   cursor; pass a saved state to read only what changed.
 
+vgi-airbyte 0.2.0 speaks VGI protocol 3.4, so it needs Haybarn 2.0.1 or newer (Haybarn 2.0.0 loads a 3.3 `vgi` extension that cannot attach it).
+
 ## Quick start
 
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'airbyte' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.1.3 vgi-airbyte-worker');
+ATTACH 'airbyte' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-airbyte@v0.2.0 vgi-airbyte-worker');
 
 -- What is in the registry, and under which licenses?
 SELECT name, version, license, license_policy
